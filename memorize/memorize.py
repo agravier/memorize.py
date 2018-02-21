@@ -33,7 +33,7 @@ no information will be cached and no memoization will
 take place.
 """
 import pickle
-import collections
+import hashlib
 import functools
 import inspect
 import os.path
@@ -42,12 +42,13 @@ import unicodedata
 
 
 # This configures the place to store cache files globally.
-# Set it to False to store cache files next to files for which function calls are cached.
+# Set it to False to store cache files next to files for which function calls
+# are cached.
 USE_CURRENT_DIR = True
 
 
 class Memorize(object):
-    '''
+    """
     A function decorated with @memorize caches its return
     value every time it is called. If the function is called
     later with the same arguments, the cached value is
@@ -57,35 +58,46 @@ class Memorize(object):
     decorated function has been updated since the last run,
     the current cache is deleted and a new cache is created
     (in case the behavior of the function has changed).
-    '''
-    def __init__(self, func):
-        self.func = func
-        function_file = inspect.getfile(func)
-        self.parent_filepath = os.path.abspath(function_file)
-        self.parent_filename = os.path.basename(function_file)
-        self.__name__ = self.func.__name__
-        self.cache = None  # lazily initialize cache to account for changed global dir setting (USE_CURRENT_DIR)
+    """
+    def __init__(self, check_cache_safety=True):
+        self.check_cache_safety = check_cache_safety
+        self.func = None
+        # lazily initialize cache to account for changed global dir setting
+        # (USE_CURRENT_DIR)
+        self.cache = None
 
     def check_cache(self):
         if self.cache is None:
             if self.cache_exists():
                 self.read_cache()  # Sets self.timestamp and self.cache
-                if not self.is_safe_cache():
+                if self.check_cache_safety and not self.is_safe_cache():
                     self.cache = {}
             else:
                 self.cache = {}
 
-    def __call__(self, *args):
-        self.check_cache()
-        if not isinstance(args, collections.Hashable):
-            return self.func(*args)
-        if args in self.cache:
-            return self.cache[args]
-        else:
-            value = self.func(*args)
-            self.cache[args] = value
-            self.save_cache()
-            return value
+    def __call__(self, func, *args, **kwargs):
+        self.func = func
+        function_file = inspect.getfile(self.func)
+        self.parent_filepath = os.path.abspath(function_file)
+        self.parent_filename = os.path.basename(function_file)
+        self.__name__ = self.func.__name__
+
+        def new_func(*args, **kwargs):
+            self.check_cache()
+            try:
+                key = _convert_call_arguments_to_hash(args, kwargs)
+            except Exception as e:
+                print(e)
+                return self.func(*args, **kwargs)
+            if key in self.cache:
+                return self.cache[key]
+            else:
+                value = self.func(*args, **kwargs)
+                self.cache[key] = value
+                self.save_cache()
+                return value
+
+        return new_func
 
     def get_cache_filename(self):
         """
@@ -94,7 +106,10 @@ class Memorize(object):
         """
         filename = _slugify(self.parent_filename.replace('.py', ''))
         funcname = _slugify(self.__name__)
-        folder = os.path.curdir if USE_CURRENT_DIR else os.path.dirname(self.parent_filepath)
+        if USE_CURRENT_DIR:
+            folder = os.path.curdir
+        else:
+            folder = os.path.dirname(self.parent_filepath)
         return os.path.join(folder, filename + '_' + funcname + '.cache')
 
     def get_last_update(self):
@@ -137,9 +152,9 @@ class Memorize(object):
             f.write(pickle.dumps(out))
 
     def cache_exists(self):
-        '''
+        """
         Returns True if a matching cache exists in the current directory.
-        '''
+        """
         if os.path.isfile(self.get_cache_filename()):
             return True
         return False
@@ -152,15 +167,21 @@ class Memorize(object):
         """ Support instance methods. """
         return functools.partial(self.__call__, obj)
 
+
 def _slugify(value):
     """
     Normalizes string, converts to lowercase, removes
-    non-alpha characters, and converts spaces to
-    hyphens. From
-    http://stackoverflow.com/questions/295135/turn-a-string-into-a-valid-filename-in-python
+    non-alpha characters, and converts spaces to hyphens.
+    From https://stackoverflow.com/q/295135/
     """
     value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore')
     value = re.sub(r'[^\w\s-]', '', value.decode('utf-8', 'ignore'))
     value = value.strip().lower()
     value = re.sub(r'[-\s]+', '-', value)
     return value
+
+
+def _convert_call_arguments_to_hash(args, kwargs):
+    binary_repr = (repr(args) + repr(kwargs)).encode('utf-8')
+    h = hashlib.sha256(binary_repr).hexdigest()
+    return h
